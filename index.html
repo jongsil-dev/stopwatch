@@ -534,7 +534,7 @@
   /* 숨은 PiP 소스 (화면에는 안 보이지만 렌더는 되어야 함) */
   #pipCanvas{
     position:fixed;left:-10000px;top:0;
-    width:640px;height:360px;
+    width:640px;height:150px;
     pointer-events:none;
     opacity:0;
   }
@@ -685,7 +685,7 @@
     <span class="f-stop">오프라인에서도 동작 · 홈 화면에 추가하면 앱처럼 열립니다</span>
   </div>
 
-  <canvas id="pipCanvas" width="640" height="360" aria-hidden="true"></canvas>
+  <canvas id="pipCanvas" width="640" height="150" aria-hidden="true"></canvas>
   <video id="pipVideo" muted playsinline autoplay aria-hidden="true"></video>
 </div>
 
@@ -1102,102 +1102,168 @@
     ctx.closePath();
   }
 
+  /* -------------------------------------------------------------
+     PiP 캔버스 — 초슬림 미니 창 (640×150, 약 4.3:1)
+     아이폰 PiP 창의 높이는 영상의 종횡비로 정해지므로, 캔버스를 납작하게
+     만들면 화면에서 차지하는 면적이 훨씬 작아집니다.
+     캔버스에는 HH:MM:SS.cc 숫자만 가득 채우고(위쪽 이름·날짜는 제거),
+     목표가 있으면 남은 시간을 오른쪽에 한 줄로 붙이고, 맨 아래에 얇은
+     진행 바만 남깁니다.
+     ------------------------------------------------------------- */
+  var PIP_W = 640, PIP_H = 150;
+  var PIP_PAD_X = 20;        /* 좌우 여백 */
+  var PIP_BAR_H = 4;         /* 진행 바 두께 */
+  var PIP_BAR_BOTTOM = 11;   /* 바닥에서 진행 바까지 */
+  var PIP_DEC = 0.44;        /* .cc 자릿수 크기(본 숫자 대비) */
+  var PIP_CD  = 0.46;        /* 카운트다운 크기(본 숫자 대비) */
+  var PIP_MIN_SQ = 0.74;     /* 가로 압축 한도 (글꼴에 따라 좌우) */
+
+  var pipRef = null;
+  function pipRefs(){
+    if(pipRef) return pipRef;
+    var adv = 60, cap = 72;   /* 아이폰 SF Mono 기준 기본값 */
+    var ctx = pipCtx;
+    if(ctx){
+      try{
+        ctx.save();
+        ctx.font = "600 100px " + MONO;
+        var one = ctx.measureText("0");
+        var all = ctx.measureText("00:00:00");
+        ctx.restore();
+        if(one.width) adv = one.width;
+        var a = all.actualBoundingBoxAscent || one.actualBoundingBoxAscent;
+        if(a) cap = a;
+      }catch(e){}
+    }
+    pipRef = { adv: adv, cap: cap };
+    return pipRef;
+  }
+
+  /* 한 덩어리 글자를 가로로 살짝 압축해 그립니다 (폭에 꽉 차게) */
+  function pipText(ctx, text, size, sq, x, baseY, color){
+    ctx.save();
+    ctx.translate(x, baseY);
+    ctx.scale(sq, 1);
+    ctx.font = "600 " + size.toFixed(1) + "px " + MONO;
+    ctx.textAlign = "left";
+    ctx.textBaseline = "alphabetic";
+    ctx.fillStyle = color;
+    ctx.fillText(text, 0, 0);
+    ctx.restore();
+  }
+
+  function pipCdText(rem){
+    var t = Math.max(0, Math.floor(rem / 100));   /* 0.1초 단위 */
+    var tenth = t % 10;
+    var totalSec = Math.floor(t / 10);
+    var s = totalSec % 60;
+    var totalMin = Math.floor(totalSec / 60);
+    var m = totalMin % 60;
+    var h = Math.floor(totalMin / 60);
+    if(h > 0) return h + ":" + pad(m, 2) + ":" + pad(s, 2) + "." + tenth;
+    return m + ":" + pad(s, 2) + "." + tenth;
+  }
+
   function drawPip(ms){
     if(!pipCtx) return;
     if(ms - lastDrawMs < 33) return;   // 최대 30fps
     lastDrawMs = ms;
 
-    var W = 640, H = 360, c = pipColors, ctx = pipCtx;
+    var W = canvas.width || PIP_W, H = canvas.height || PIP_H;
+    var c = pipColors, ctx = pipCtx;
     var d = new Date(ms);
     var rem = target ? Math.max(0, target.ms - ms) : null;
     var warn = rem !== null && rem <= 10000;
 
-    ctx.clearRect(0, 0, W, H);
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.globalAlpha = 1;
     ctx.fillStyle = c.bg;
     ctx.fillRect(0, 0, W, H);
 
     /* 은은한 상단 광원 */
     var g = ctx.createLinearGradient(0, 0, 0, H);
-    g.addColorStop(0, warn ? "rgba(248,113,113,.14)" : "rgba(52,211,153,.10)");
-    g.addColorStop(.55, "rgba(0,0,0,0)");
+    g.addColorStop(0, warn ? "rgba(248,113,113,.14)" : "rgba(52,211,153,.13)");
+    g.addColorStop(.75, "rgba(0,0,0,0)");
     ctx.fillStyle = g;
     ctx.fillRect(0, 0, W, H);
 
-    /* 상단: 이름 / 날짜 */
-    ctx.textBaseline = "alphabetic";
-    ctx.textAlign = "left";
-    ctx.font = "700 17px " + SANS;
-    ctx.fillStyle = c.muted;
-    ctx.fillText("실시간 시계", 30, 46);
+    var m = pipRefs();
+    var unit = m.adv / 100;       /* 크기 1px 당 한 글자 폭 */
+    var capUnit = m.cap / 100;    /* 크기 1px 당 숫자 높이 */
 
-    ctx.textAlign = "right";
-    ctx.font = "600 17px " + SANS;
-    ctx.fillStyle = c.dim;
-    ctx.fillText((d.getMonth() + 1) + "/" + d.getDate() + " (" + WEEK[d.getDay()] + ")", W - 30, 46);
+    /* 시각 */
+    var main = pad(d.getHours(), 2) + ":" + pad(d.getMinutes(), 2) + ":" + pad(d.getSeconds(), 2);
+    var dec  = "." + pad(Math.floor(d.getMilliseconds() / 10), 2);
 
-    /* 메인 시각 HH:MM:SS.cc */
-    var hh = pad(d.getHours(), 2), mi = pad(d.getMinutes(), 2), ss = pad(d.getSeconds(), 2);
-    var cc = pad(Math.floor(d.getMilliseconds() / 10), 2);
-    var main = hh + ":" + mi + ":" + ss;
-    var dec = "." + cc;
+    /* 숫자를 놓을 수 있는 영역 (아래 진행 바 자리는 비워 둠) */
+    var barY = H - PIP_BAR_BOTTOM - PIP_BAR_H;
+    var zoneTop = 0, zoneH = barY - 5;
 
-    ctx.font = "600 104px " + MONO;
-    var mainW = ctx.measureText(main).width;
-    ctx.font = "600 46px " + MONO;
-    var decW = ctx.measureText(dec).width;
+    /* 목표 카운트다운: 오른쪽에 한 줄 */
+    var cdText = rem !== null ? pipCdText(rem) : "";
+    var cdLen = cdText.length;
 
-    var total = mainW + decW + 4;
-    var x0 = (W - total) / 2;
-    var baseY = rem !== null ? 196 : 216;
+    var avail = W - PIP_PAD_X * 2;
+    var gMain = 0.05, gCd = 0.42;    /* 크기 대비 간격 */
+    var perSize = 8 * unit + 3 * unit * PIP_DEC + gMain;
+    if(cdLen) perSize += gCd + cdLen * unit * PIP_CD;
 
-    ctx.textAlign = "left";
-    ctx.font = "600 104px " + MONO;
-    ctx.fillStyle = warn ? c.red : c.text;
-    ctx.fillText(main, x0, baseY);
+    /* 높이에 맞춰 최대한 크게, 폭이 모자라면 가로로 살짝 압축 */
+    var sH = zoneH / capUnit;
+    var sW = avail / (perSize * PIP_MIN_SQ);
+    var S = Math.max(12, Math.min(sH, sW));
+    var sq = Math.max(PIP_MIN_SQ, Math.min(1, avail / (perSize * S)));
 
-    ctx.font = "600 46px " + MONO;
-    ctx.fillStyle = warn ? c.red : c.green;
-    ctx.fillText(dec, x0 + mainW + 4, baseY);
+    var cdSize = S * PIP_CD;
+    var mainW = 8 * unit * S;
+    var decW  = 3 * unit * S * PIP_DEC;
+    var cdW   = cdLen ? cdLen * unit * cdSize : 0;
+    var gm    = gMain * S;
+    var gc    = gCd * S;
 
-    /* 하단: 목표 카운트다운 */
+    var totalW = (mainW + gm + decW + (cdLen ? gc + cdW : 0)) * sq;
+    var x = (W - totalW) / 2;
+
+    var capH = capUnit * S;
+    var baseY = zoneTop + (zoneH - capH) / 2 + capH;
+
+    var colMain = warn ? c.red : c.text;
+    var colDec  = warn ? c.red : c.green;
+
+    pipText(ctx, main, S, sq, x, baseY, colMain);
+    pipText(ctx, dec, S * PIP_DEC, sq, x + (mainW + gm) * sq, baseY, colDec);
+    if(cdLen){
+      /* 시계와 남은 시간 사이 얇은 구분선 */
+      var midY = baseY - capH * 0.36;
+      var dh = Math.max(10, capH * 0.46);
+      var dx = x + (mainW + gm + decW + gc * 0.5) * sq;
+      ctx.fillStyle = warn ? "rgba(248,113,113,.55)" : "rgba(139,148,163,.5)";
+      ctx.fillRect(dx, midY - dh / 2, 2, dh);
+
+      pipText(ctx, cdText, cdSize, sq, x + (mainW + gm + decW + gc) * sq, baseY, colDec);
+    }
+
+    /* 맨 아래 얇은 진행 바 */
+    var bx = PIP_PAD_X, bw = W - PIP_PAD_X * 2, bh = PIP_BAR_H, r = bh / 2;
+    var ratio;
     if(rem !== null){
-      var f = fmtCd(rem);
-      var cdText = f.big + f.tenth;
-      ctx.textAlign = "left";
-      ctx.font = "600 21px " + SANS;
-      ctx.fillStyle = c.muted;
-      ctx.fillText("목표 " + target.hhmm, 30, 300);
-
-      ctx.textAlign = "right";
-      ctx.font = "700 40px " + MONO;
-      ctx.fillStyle = warn ? c.red : c.text;
-      ctx.fillText(cdText, W - 30, 306);
-
-      /* 진행 바 */
       var elapsed = ms - target.setAt;
-      var ratio = Math.max(0, Math.min(1, elapsed / target.span));
-      var bx = 30, by = 322, bw = W - 60, bh = 8;
-      ctx.fillStyle = warn ? "rgba(248,113,113,.22)" : "rgba(139,148,163,.20)";
-      roundRect(ctx, bx, by, bw, bh, 4); ctx.fill();
-      if(ratio > 0){
-        ctx.fillStyle = warn ? c.red : c.green;
-        roundRect(ctx, bx, by, Math.max(bh, bw * ratio), bh, 4); ctx.fill();
-      }
+      ratio = Math.max(0, Math.min(1, elapsed / target.span));
     } else {
-      /* 목표가 없을 때: 현재 초 진행 바 */
-      var ratio2 = (d.getSeconds() + d.getMilliseconds() / 1000) / 60;
-      var bx2 = 30, by2 = 316, bw2 = W - 60, bh2 = 6;
-      ctx.fillStyle = "rgba(139,148,163,.18)";
-      roundRect(ctx, bx2, by2, bw2, bh2, 3); ctx.fill();
-      ctx.fillStyle = c.green;
-      roundRect(ctx, bx2, by2, Math.max(bh2, bw2 * ratio2), bh2, 3); ctx.fill();
+      ratio = (d.getSeconds() + d.getMilliseconds() / 1000) / 60;
+    }
+    ctx.fillStyle = warn ? "rgba(248,113,113,.22)" : "rgba(139,148,163,.20)";
+    roundRect(ctx, bx, barY, bw, bh, r); ctx.fill();
+    if(ratio > 0){
+      ctx.fillStyle = warn ? c.red : c.green;
+      roundRect(ctx, bx, barY, Math.max(bh, bw * ratio), bh, r); ctx.fill();
     }
 
     /* 마지막 10초: 테두리 강조 */
     if(warn){
       ctx.strokeStyle = "rgba(248,113,113,.85)";
-      ctx.lineWidth = 6;
-      roundRect(ctx, 3, 3, W - 6, H - 6, 14);
+      ctx.lineWidth = 3;
+      roundRect(ctx, 2, 2, W - 4, H - 4, 10);
       ctx.stroke();
     }
   }
@@ -1253,7 +1319,7 @@
     }
   }
 
-  /* 영상 메타데이터(640×360)가 준비될 때까지 짧게 기다립니다 */
+  /* 영상 메타데이터(640×150)가 준비될 때까지 짧게 기다립니다 */
   function whenMetaReady(cb){
     if(video.readyState >= 1){ cb(); return; }
     var done = false;
