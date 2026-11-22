@@ -244,6 +244,38 @@
   .pip-note.warn{color:var(--amber)}
   .pip-note:empty{display:none}
 
+  /* PiP 창 비율 선택 (아주 작은 칩) */
+  .pip-ratios{
+    flex:none;
+    display:flex;align-items:center;justify-content:center;
+    flex-wrap:wrap;
+    gap:5px;
+    margin-top:7px;
+  }
+  .ratio-chip{
+    -webkit-appearance:none;appearance:none;
+    border:1px solid var(--line);
+    background:transparent;
+    color:var(--dim);
+    font-family:inherit;
+    font-size:10.5px;
+    font-weight:700;
+    letter-spacing:.005em;
+    line-height:1.2;
+    padding:4px 8px;
+    border-radius:999px;
+    cursor:pointer;
+    white-space:nowrap;
+    transition:background .18s ease,border-color .18s ease,color .18s ease,transform .12s ease;
+  }
+  .ratio-chip:active{transform:scale(.95)}
+  .ratio-chip[aria-pressed="true"],
+  .ratio-chip.on{
+    background:color-mix(in srgb,var(--green) 14%,transparent);
+    border-color:color-mix(in srgb,var(--green) 50%,transparent);
+    color:var(--green);
+  }
+
   /* target card */
   .target-card{
     flex:none;
@@ -534,7 +566,7 @@
   /* 숨은 PiP 소스 (화면에는 안 보이지만 렌더는 되어야 함) */
   #pipCanvas{
     position:fixed;left:-10000px;top:0;
-    width:640px;height:150px;
+    width:320px;height:210px;
     pointer-events:none;
     opacity:0;
   }
@@ -617,6 +649,11 @@
       </svg>
       <span id="pipBtnText">작은 창으로 띄우기 (PiP)</span>
     </button>
+    <div class="pip-ratios" id="pipRatios" role="group" aria-label="작은 창 비율">
+      <button class="ratio-chip" type="button" data-ratio="mini" aria-pressed="true">미니 카드 (3:2)</button>
+      <button class="ratio-chip" type="button" data-ratio="square" aria-pressed="false">정사각 (1:1)</button>
+      <button class="ratio-chip" type="button" data-ratio="bar" aria-pressed="false">슬림 바 (4:1)</button>
+    </div>
     <div class="pip-note" id="pipNote" role="status"></div>
 
     <div class="target-card" id="targetCard">
@@ -685,7 +722,7 @@
     <span class="f-stop">오프라인에서도 동작 · 홈 화면에 추가하면 앱처럼 열립니다</span>
   </div>
 
-  <canvas id="pipCanvas" width="640" height="150" aria-hidden="true"></canvas>
+  <canvas id="pipCanvas" width="320" height="210" aria-hidden="true"></canvas>
   <video id="pipVideo" muted playsinline autoplay aria-hidden="true"></video>
 </div>
 
@@ -1103,20 +1140,23 @@
   }
 
   /* -------------------------------------------------------------
-     PiP 캔버스 — 초슬림 미니 창 (640×150, 약 4.3:1)
-     아이폰 PiP 창의 높이는 영상의 종횡비로 정해지므로, 캔버스를 납작하게
-     만들면 화면에서 차지하는 면적이 훨씬 작아집니다.
-     캔버스에는 HH:MM:SS.cc 숫자만 가득 채우고(위쪽 이름·날짜는 제거),
-     목표가 있으면 남은 시간을 오른쪽에 한 줄로 붙이고, 맨 아래에 얇은
-     진행 바만 남깁니다.
+     PiP 캔버스 비율 — 3가지 중 선택
+       mini   : 320×210 (약 3:2)   ← 기본. 윗줄 HH:MM:SS, 아랫줄 .cc · 남은 시간
+       square : 240×240 (1:1)      ← 가장 작은 면적
+       bar    : 640×160 (4:1)      ← 한 줄 초슬림
+     아이폰 PiP 창의 높이는 영상의 종횡비로 정해집니다. 4.3:1처럼 너무
+     납작하면 시스템 최소 높이를 맞추려고 가로 폭을 화면 끝까지 키워서
+     오히려 커지므로, 기본값은 3:2 카드로 두고 아이폰에서 가장 작게
+     느껴지는 비율을 사용자가 직접 골라 저장할 수 있게 했습니다.
      ------------------------------------------------------------- */
-  var PIP_W = 640, PIP_H = 150;
-  var PIP_PAD_X = 20;        /* 좌우 여백 */
-  var PIP_BAR_H = 4;         /* 진행 바 두께 */
-  var PIP_BAR_BOTTOM = 11;   /* 바닥에서 진행 바까지 */
-  var PIP_DEC = 0.44;        /* .cc 자릿수 크기(본 숫자 대비) */
-  var PIP_CD  = 0.46;        /* 카운트다운 크기(본 숫자 대비) */
-  var PIP_MIN_SQ = 0.74;     /* 가로 압축 한도 (글꼴에 따라 좌우) */
+  var PIP_RATIOS = {
+    mini:   { w: 320, h: 210, name: "미니 카드 (3:2)" },
+    square: { w: 240, h: 240, name: "정사각 (1:1)" },
+    bar:    { w: 640, h: 160, name: "슬림 바 (4:1)" }
+  };
+  var pipRatio = store.get("pipRatio", "mini");
+  if(!PIP_RATIOS[pipRatio]) pipRatio = "mini";
+  var pipRatiosEl = $("pipRatios");
 
   var pipRef = null;
   function pipRefs(){
@@ -1164,100 +1204,158 @@
     return m + ":" + pad(s, 2) + "." + tenth;
   }
 
-  function drawPip(ms){
-    if(!pipCtx) return;
-    if(ms - lastDrawMs < 33) return;   // 최대 30fps
-    lastDrawMs = ms;
+  /* -------------------------------------------------------------
+     PiP 캔버스 그리기 (비율별 레이아웃)
+     ------------------------------------------------------------- */
 
-    var W = canvas.width || PIP_W, H = canvas.height || PIP_H;
-    var c = pipColors, ctx = pipCtx;
-    var d = new Date(ms);
-    var rem = target ? Math.max(0, target.ms - ms) : null;
-    var warn = rem !== null && rem <= 10000;
-
+  /* 공통: 배경 + 은은한 상단 광원 */
+  function pipBackdrop(ctx, W, H, warn){
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.globalAlpha = 1;
-    ctx.fillStyle = c.bg;
+    ctx.fillStyle = pipColors.bg;
     ctx.fillRect(0, 0, W, H);
-
-    /* 은은한 상단 광원 */
     var g = ctx.createLinearGradient(0, 0, 0, H);
-    g.addColorStop(0, warn ? "rgba(248,113,113,.14)" : "rgba(52,211,153,.13)");
+    g.addColorStop(0, warn ? "rgba(248,113,113,.15)" : "rgba(52,211,153,.13)");
     g.addColorStop(.75, "rgba(0,0,0,0)");
     ctx.fillStyle = g;
     ctx.fillRect(0, 0, W, H);
+  }
 
-    var m = pipRefs();
-    var unit = m.adv / 100;       /* 크기 1px 당 한 글자 폭 */
-    var capUnit = m.cap / 100;    /* 크기 1px 당 숫자 높이 */
-
-    /* 시각 */
-    var main = pad(d.getHours(), 2) + ":" + pad(d.getMinutes(), 2) + ":" + pad(d.getSeconds(), 2);
-    var dec  = "." + pad(Math.floor(d.getMilliseconds() / 10), 2);
-
-    /* 숫자를 놓을 수 있는 영역 (아래 진행 바 자리는 비워 둠) */
-    var barY = H - PIP_BAR_BOTTOM - PIP_BAR_H;
-    var zoneTop = 0, zoneH = barY - 5;
-
-    /* 목표 카운트다운: 오른쪽에 한 줄 */
-    var cdText = rem !== null ? pipCdText(rem) : "";
-    var cdLen = cdText.length;
-
-    var avail = W - PIP_PAD_X * 2;
-    var gMain = 0.05, gCd = 0.42;    /* 크기 대비 간격 */
-    var perSize = 8 * unit + 3 * unit * PIP_DEC + gMain;
-    if(cdLen) perSize += gCd + cdLen * unit * PIP_CD;
-
-    /* 높이에 맞춰 최대한 크게, 폭이 모자라면 가로로 살짝 압축 */
-    var sH = zoneH / capUnit;
-    var sW = avail / (perSize * PIP_MIN_SQ);
-    var S = Math.max(12, Math.min(sH, sW));
-    var sq = Math.max(PIP_MIN_SQ, Math.min(1, avail / (perSize * S)));
-
-    var cdSize = S * PIP_CD;
-    var mainW = 8 * unit * S;
-    var decW  = 3 * unit * S * PIP_DEC;
-    var cdW   = cdLen ? cdLen * unit * cdSize : 0;
-    var gm    = gMain * S;
-    var gc    = gCd * S;
-
-    var totalW = (mainW + gm + decW + (cdLen ? gc + cdW : 0)) * sq;
-    var x = (W - totalW) / 2;
-
-    var capH = capUnit * S;
-    var baseY = zoneTop + (zoneH - capH) / 2 + capH;
-
-    var colMain = warn ? c.red : c.text;
-    var colDec  = warn ? c.red : c.green;
-
-    pipText(ctx, main, S, sq, x, baseY, colMain);
-    pipText(ctx, dec, S * PIP_DEC, sq, x + (mainW + gm) * sq, baseY, colDec);
-    if(cdLen){
-      /* 시계와 남은 시간 사이 얇은 구분선 */
-      var midY = baseY - capH * 0.36;
-      var dh = Math.max(10, capH * 0.46);
-      var dx = x + (mainW + gm + decW + gc * 0.5) * sq;
-      ctx.fillStyle = warn ? "rgba(248,113,113,.55)" : "rgba(139,148,163,.5)";
-      ctx.fillRect(dx, midY - dh / 2, 2, dh);
-
-      pipText(ctx, cdText, cdSize, sq, x + (mainW + gm + decW + gc) * sq, baseY, colDec);
-    }
-
-    /* 맨 아래 얇은 진행 바 */
-    var bx = PIP_PAD_X, bw = W - PIP_PAD_X * 2, bh = PIP_BAR_H, r = bh / 2;
+  /* 공통: 맨 아래 얇은 진행 바 (목표가 있으면 남은 양, 없으면 이번 분 진행) */
+  function pipProgress(ctx, ms, W, barY, barH, warn){
+    var d = new Date(ms);
+    var padX = Math.round(W * 0.04);
+    var bx = padX, bw = W - padX * 2, r = barH / 2;
     var ratio;
-    if(rem !== null){
-      var elapsed = ms - target.setAt;
-      ratio = Math.max(0, Math.min(1, elapsed / target.span));
+    if(target){
+      ratio = Math.max(0, Math.min(1, (ms - target.setAt) / target.span));
     } else {
       ratio = (d.getSeconds() + d.getMilliseconds() / 1000) / 60;
     }
     ctx.fillStyle = warn ? "rgba(248,113,113,.22)" : "rgba(139,148,163,.20)";
-    roundRect(ctx, bx, barY, bw, bh, r); ctx.fill();
+    roundRect(ctx, bx, barY, bw, barH, r); ctx.fill();
     if(ratio > 0){
-      ctx.fillStyle = warn ? c.red : c.green;
-      roundRect(ctx, bx, barY, Math.max(bh, bw * ratio), bh, r); ctx.fill();
+      ctx.fillStyle = warn ? pipColors.red : pipColors.green;
+      roundRect(ctx, bx, barY, Math.max(barH, bw * ratio), barH, r); ctx.fill();
     }
+  }
+
+  /* 한 줄 초슬림 바(4:1) : HH:MM:SS.cc  |  남은 시간 */
+  function pipLayoutBar(ctx, ms, W, H, main, dec, cdText, unit, capUnit, warn){
+    var c = pipColors;
+    var barH = Math.max(4, Math.round(H * 0.024));
+    var barBottom = Math.max(7, Math.round(H * 0.042));
+    var barY = H - barBottom - barH;
+    var padX = Math.round(W * 0.032);
+    var avail = W - padX * 2;
+    var zoneH = barY - Math.round(H * 0.02);
+    var cdLen = cdText.length;
+    var DEC = 0.44, CDF = 0.46, MINSQ = 0.74;
+    var gMain = 0.05, gCd = 0.42;
+
+    var perSize = 8 * unit + 3 * unit * DEC + gMain;
+    if(cdLen) perSize += gCd + cdLen * unit * CDF;
+
+    var S = Math.max(12, Math.min(zoneH / capUnit, avail / (perSize * MINSQ)));
+    var sq = Math.max(MINSQ, Math.min(1, avail / (perSize * S)));
+
+    var cdSize = S * CDF;
+    var mainW = 8 * unit * S;
+    var decW  = 3 * unit * S * DEC;
+    var cdW   = cdLen ? cdLen * unit * cdSize : 0;
+    var gm = gMain * S, gc = gCd * S;
+    var totalW = (mainW + gm + decW + (cdLen ? gc + cdW : 0)) * sq;
+    var x = (W - totalW) / 2;
+    var capH = capUnit * S;
+    var baseY = (zoneH - capH) / 2 + capH;
+
+    pipText(ctx, main, S, sq, x, baseY, warn ? c.red : c.text);
+    pipText(ctx, dec, S * DEC, sq, x + (mainW + gm) * sq, baseY, warn ? c.red : c.green);
+    if(cdLen){
+      var dh = Math.max(10, capH * 0.46);
+      var midY = baseY - capH * 0.36;
+      var dx = x + (mainW + gm + decW + gc * 0.5) * sq;
+      ctx.fillStyle = warn ? "rgba(248,113,113,.55)" : "rgba(139,148,163,.5)";
+      ctx.fillRect(dx, midY - dh / 2, 2, dh);
+      pipText(ctx, cdText, cdSize, sq, x + (mainW + gm + decW + gc) * sq, baseY, warn ? c.red : c.green);
+    }
+    pipProgress(ctx, ms, W, barY, barH, warn);
+  }
+
+  /* 카드(3:2 · 1:1) : 윗줄 HH:MM:SS 크게, 아랫줄 .cc · 남은 시간 컴팩트 */
+  function pipLayoutCard(ctx, ms, W, H, main, dec, cdText, unit, capUnit, warn){
+    var c = pipColors;
+    var barH = Math.max(4, Math.round(H * 0.024));
+    var barBottom = Math.max(7, Math.round(H * 0.042));
+    var barY = H - barBottom - barH;
+    var padX = Math.max(8, Math.round(W * 0.045));
+    var avail = W - padX * 2;
+    var zoneH = barY - Math.round(H * 0.02);
+
+    /* 윗줄: 폭을 꽉 채우되 가로 압축은 16%까지만 */
+    var MINSQ = 0.84;
+    var S1 = Math.min(avail / (8 * unit * MINSQ), (zoneH * 0.66) / capUnit);
+    S1 = Math.max(10, S1);
+    var sq1 = Math.min(1, Math.max(MINSQ, avail / (8 * unit * S1)));
+
+    var cap1 = capUnit * S1;
+    var mainW = 8 * unit * S1;
+
+    /* 아랫줄: .cc · 남은 시간 */
+    var S2 = Math.max(9, S1 * 0.46);
+    var cap2 = capUnit * S2;
+    var decW = 3 * unit * S2;
+    var gap = S2 * 0.36;
+    var sep = S2 * 0.34;
+    var hasCd = cdText.length > 0;
+    var cdW = hasCd ? cdText.length * unit * S2 : 0;
+    var rowW = decW + (hasCd ? gap + sep + gap + cdW : 0);
+    var sq2 = rowW > avail ? Math.max(0.68, avail / rowW) : 1;
+
+    var rowGap = Math.min(S1 * 0.42, cap1 * 0.5);
+    var blockH = cap1 + rowGap + cap2;
+    var topPad = Math.max(0, (zoneH - blockH) / 2);
+    var base1 = topPad + cap1;
+    var base2 = base1 + rowGap + cap2;
+
+    var x1 = (W - mainW * sq1) / 2;
+    pipText(ctx, main, S1, sq1, x1, base1, warn ? c.red : c.text);
+
+    var x2 = (W - rowW * sq2) / 2;
+    pipText(ctx, dec, S2, sq2, x2, base2, warn ? c.red : c.green);
+    if(hasCd){
+      var dotX = x2 + (decW + gap + sep * 0.5) * sq2;
+      var dotY = base2 - cap2 * 0.30;
+      ctx.fillStyle = warn ? "rgba(248,113,113,.7)" : "rgba(139,148,163,.6)";
+      ctx.beginPath();
+      ctx.arc(dotX, dotY, Math.max(1.2, S2 * 0.055), 0, Math.PI * 2);
+      ctx.fill();
+      pipText(ctx, cdText, S2, sq2, x2 + (decW + gap + sep + gap) * sq2, base2, warn ? c.red : c.muted);
+    }
+    pipProgress(ctx, ms, W, barY, barH, warn);
+  }
+
+  function drawPip(ms){
+    if(!pipCtx) return;
+    if(ms - lastDrawMs < 33) return;   /* 최대 30fps */
+    lastDrawMs = ms;
+
+    var W = canvas.width || PIP_RATIOS[pipRatio].w;
+    var H = canvas.height || PIP_RATIOS[pipRatio].h;
+    var c = pipColors, ctx = pipCtx;
+    var d = new Date(ms);
+    var rem = target ? Math.max(0, target.ms - ms) : null;
+    var warn = rem !== null && rem <= 10000;
+    var m = pipRefs();
+    var unit = m.adv / 100, capUnit = m.cap / 100;
+
+    var main = pad(d.getHours(), 2) + ":" + pad(d.getMinutes(), 2) + ":" + pad(d.getSeconds(), 2);
+    var dec  = "." + pad(Math.floor(d.getMilliseconds() / 10), 2);
+    var cdText = rem !== null ? pipCdText(rem) : "";
+
+    pipBackdrop(ctx, W, H, warn);
+    if(pipRatio === "bar") pipLayoutBar(ctx, ms, W, H, main, dec, cdText, unit, capUnit, warn);
+    else pipLayoutCard(ctx, ms, W, H, main, dec, cdText, unit, capUnit, warn);
 
     /* 마지막 10초: 테두리 강조 */
     if(warn){
@@ -1319,7 +1417,7 @@
     }
   }
 
-  /* 영상 메타데이터(640×150)가 준비될 때까지 짧게 기다립니다 */
+  /* 영상 메타데이터(캔버스 크기)가 준비될 때까지 짧게 기다립니다 */
   function whenMetaReady(cb){
     if(video.readyState >= 1){ cb(); return; }
     var done = false;
@@ -1403,6 +1501,63 @@
     if(isPipActive()) exitPip();
     else enterPip();
   });
+
+  /* ---------- PiP 창 비율 선택 (미니 카드 / 정사각 / 슬림 바) ---------- */
+  function setCanvasSize(key){
+    var p = PIP_RATIOS[key] || PIP_RATIOS.mini;
+    canvas.width = p.w;
+    canvas.height = p.h;
+    canvas.style.width = p.w + "px";
+    canvas.style.height = p.h + "px";
+    pipRef = null;
+  }
+
+  function syncRatioChips(){
+    if(!pipRatiosEl) return;
+    var chips = pipRatiosEl.querySelectorAll(".ratio-chip");
+    for(var i = 0; i < chips.length; i++){
+      var on = chips[i].getAttribute("data-ratio") === pipRatio;
+      chips[i].classList.toggle("on", on);
+      chips[i].setAttribute("aria-pressed", on ? "true" : "false");
+    }
+  }
+
+  function applyPipRatio(key, silent){
+    if(!PIP_RATIOS[key]) key = "mini";
+    var changed = key !== pipRatio;
+    pipRatio = key;
+    store.set("pipRatio", key);
+    setCanvasSize(key);
+    syncRatioChips();
+    lastDrawMs = 0;
+    drawPip(Date.now());
+
+    /* 창이 떠 있지 않을 때만 스트림을 새 크기로 다시 만듭니다 */
+    if(changed && !isPipActive() && video.srcObject){
+      try{
+        var tracks = stream && stream.getTracks ? stream.getTracks() : [];
+        for(var i = 0; i < tracks.length; i++){ try{ tracks[i].stop(); }catch(e){} }
+      }catch(e){}
+      try{ video.srcObject = null; }catch(e){}
+      stream = null;
+    }
+
+    if(changed && !silent){
+      sfx("tick");
+      if(isPipActive()){
+        note("비율을 바꿨습니다. 지금 떠 있는 창은 그대로이니, 창을 닫았다가 다시 열면 " + PIP_RATIOS[key].name + " 비율로 뜹니다.", "warn");
+      }
+    }
+    return key;
+  }
+
+  if(pipRatiosEl){
+    pipRatiosEl.addEventListener("click", function(e){
+      var btn = e.target.closest ? e.target.closest(".ratio-chip") : null;
+      if(!btn) return;
+      applyPipRatio(btn.getAttribute("data-ratio"), false);
+    });
+  }
 
   video.addEventListener("enterpictureinpicture", updatePipUI);
   video.addEventListener("leavepictureinpicture", function(){
@@ -1741,7 +1896,9 @@
   paintCountdown(Date.now(), true);
   paintStop();
   renderLaps();
-  /* PiP 스트림을 미리 만들어 둡니다 — 첫 탭에서 바로 작은 창이 열리도록 */
+  /* 저장된 PiP 비율로 캔버스 크기를 맞춘 뒤, 스트림을 미리 만들어 둡니다
+     — 첫 탭에서 바로 작은 창이 열리도록 */
+  applyPipRatio(pipRatio, true);
   ensureStream();
   startRaf();
 
@@ -1752,12 +1909,15 @@
   window.TicketClock = {
     setTargetMs: function(ms, hhmm){ setTargetMs(ms, hhmm || "", true); },
     clearTarget: function(){ clearTarget(true); },
+    setPipRatio: function(key){ return applyPipRatio(key, true); },
     getState: function(){
       return {
         view: view,
         targetMs: target ? target.ms : null,
         targetHHMM: target ? target.hhmm : null,
         remaining: target ? Math.max(0, target.ms - Date.now()) : null,
+        pipRatio: pipRatio,
+        canvas: canvas.width + "x" + canvas.height,
         pipActive: isPipActive(),
         hasStream: !!(video.srcObject && video.srcObject.getVideoTracks && video.srcObject.getVideoTracks().length)
       };
